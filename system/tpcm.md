@@ -3,7 +3,7 @@
 # Third Party Container Management
 
 ## High Level Design Document
-**Rev 0.1**
+**Rev 3.5**
 
 ## Table of Contents
 
@@ -27,6 +27,7 @@
   * [TPC Uninstall](#tpc-uninstall)
   * [TPC List](#tpc-list)
   * [TPC Docker Upgrade](#tpc-docker-upgrade)
+  * [TPC Update](#tpc-update)
   * [System Reboot](#system-reboot)
 * [CLI](#cli)
 * [KLISH CLI](#klish-cli)
@@ -45,8 +46,11 @@ Rev   |   Date   |  Author   | Change Description
 2.1   | 23/07/20 | Precy Lee | update tpcm uninstall and upgrade CLIs 
 2.2   | 06/08/20 | Precy Lee | TPCM OC yang compliance
 3.0   | 01/04/22 | Kalimuthu | TPCM over MGMT VRF 
-
-
+3.1   | 25/04/22 | Senthil G | TPCM Resource(Memory) Limit
+3.2   | 27/04/22 | Senthil G | TPCM update CLI
+3.3   | 13/05/22 | Senthil G | TPCM service dependency
+3.4   | 15/06/22 | Senthil G | 4.1 release TPCM Disk limit and porting enhancements from 3.7
+3.5   | 15/07/22 | Senthil G | 4.1 disk limit update provision and design details
 
 # About this Manual
 
@@ -105,7 +109,6 @@ TPCM should support the following Docker life cycle:
 - TPCM should provide support for seamless TPC upgrade with the provision of container data backup and restore. 
 - TPCM should provide an interface to enforce the TPC resource[ DISK, CPU and MEMORY ] usage limitation, but the current release covers only the CPU limitation. 
 
-
 ## SONIC 3.7 - TPC over Static VRF Requirements(4/22 - Code Drop)
 - Provision the TPCM to run on the statically configured Mgmt-VRF.
 - Resource management for CPU and Memory.
@@ -122,6 +125,25 @@ TPCM should support the following Docker life cycle:
 	- If the mgmt-VRF is deleted with running TPC on it, it should automatically migrate all the VRF TPCs into default VRF.
 	- When mgmt-VRF is configured again, it should automatically migrate all VRF TPSs from default VRF to mgmt-VRF.
 	- If TPCs are not configured with VRF, it should always run in the default VRF.
+
+## SONIC 4.1 - Porting of TPC Enhancements from release 3.7
+- Porting of TPC mgmt vrf support
+- Porting of TPC memory limit support
+- Porting of TPC service startup dependency( start after system ready)
+- Porting of TPC update CLI support
+
+## SONIC 4.1 - TPC Disk space limit and Restriction of TPC on low end platforms
+- Resource management for Disk
+- TPCs should not be allowed to consume more than 20% of the overall disk space.
+- Individual TPC disk limits are not supported.
+- Prevent TPC support on low end platforms with disk space less than 32G.
+- Automatic imposing of disk limits for TPCs on 4.1 image when upgraded from earlier releases. 
+  However, if the disk utilization of the TPCs in earlier releases is greater than default overall TPC disk limit, 
+  adjusted disk limit will be automatically set in order to support the TPCs running in older releases.
+  This is to make sure of a non-disruptive upgrade.
+- Removal of TPC disk limits while migrating from current 4.1 release to older releases
+- Updating the TPC disk limit(users to set limit) should be supported for the below reason
+  Allowing the users to set the disk limit means providing them the control based on their deployment scenarios. 
 
 
 ## Configuration and Management Requirements
@@ -187,33 +209,201 @@ TPCM should support the following Docker life cycle:
 
 ## tpcm@mgmt Service
 The TPCM@mgmt service is a SONiC systemd service and it gets added dynamically when MGMT VRF is configured.
-- This service takes care of starting the docker@mgmt.service and container@mgmt.service instances. 
+- This service takes care of starting the dockerd@mgmt.service and containerd@mgmt.service instances. 
 - The @mgmt.services launch the seconds instance of dockerd and containerd instance under mgmt VRF.  
 - Since it uses shared storage for TPC, No change is required during the SONiC image upgrade and reload. 
 
 ## @mgmt.services
 - When mgmt VRF is configured two @mgmt services gets created and lanuched automatically.
 - It creates the dockerd@mgmt.servce and containerd@mgmt.service instances.
-- The container@mgmt.server creates second instance of containerd over mgmt cgroup.
+- The containerd@mgmt.server creates second instance of containerd over mgmt cgroup.
 - The dockerd@mgmt.service creates the seconds of dockerd over cgroup and connects to second containerd instance through unix socket. 
 - Communication between the between @mgmt services are through mgmt named unix socket.
 - These servies are removed automatically when mgmt VRF is removed.
 
+## tpcm@default Service (SONIC 4.1)
+The TPCM@default service is a SONiC systemd service and it gets launched automatically on bootup.
+- This service takes care of starting the dockerd@default.service and containerd@default.service instances. 
+- The @default.services launch the third instance of dockerd and containerd instance under default category.  
+- /var/lib/docker folder's default TPC services are to be placed under /host/tpcmdisk/docker-default directory during upgrade from older release to 4.1
 
 ## Resource Limitation and Configuration 
-### Disk Storage
-- TPCM feature will be supported on systems with a minimum of 32G.
-- TPC with the System Docker
-    - To support auto migration of TPCM dockers, we need double the size and hence only half of it can be effectively used.
+### Disk Storage (SONIC 4.1)
+- TPCM feature will be supported on systems with a minimum of 32G disk space.
+  Though the disk space is 32G, deducting the partition management overhead size, only around 29G will be usable. Hence we support disk space from 29G (29000M).
+- Default TPC disk limit is set to 20% of overall disk space.( say, 20% of 32G disk = ~6.2G)
+- Individual TPC disk limits are not supported.
+- Automatic imposing of disk limits for TPCs on 4.1 image when upgraded from earlier releases. 
+  However, if the disk utilization of the TPCs in earlier releases is greater than default overall TPC disk limit, 
+  adjusted disk limit will be automatically set in order to support the TPCs running in older releases.
+  To support the non-disruptive upgrade with respect to TPC,
+  if the cumulative TPC disk usage in previous release exceeds the default TPC disk limit, then highest value plus a buffer disk size of 1G will be set as the new TPC disk limit. Buffer is provided to allow TPCs to work and expand in current release.
+  For instance:
+  7G is the previous release TPC disk size and the default 20% TPC disk limit is 6.2G on a 32G disk.
+  During upgrade, as the required TPC disk size exceeds the default TPC limit size, 7G + 1G = 8G will be set as the new TPC disk limit to honor the existing TPCs.
+  Also, if the allocation fails, then the underlying TPC framework (docker and container services) will not launch to support TPC.
+  INFO Syslog will be generated to alert the user that TPC disk space is adjusted.
 
-- TPC Resource Limitation with MGMT VRF.
-    - TPC dockers are shared across SONiC images, so this doesnt require temporary storage.
+  Jul 01 05:59:22.346093+00:00 2022 sonic INFO tpcm.sh[5999]: [ tpcm ] Disk limit adjusted to 8322M
+
+- Removal of TPC disk limits while migrating from current 4.1 release to older releases
+- Updating the TPC disk limit is supported through CLI. 
+- A new click as well as klish CLI is provided for this disk limit update(expand or shrink).
+- A separate host disk image file system is created for TPCM and mounted.
+- TPCs gets downloaded to /host/tpcmdisk (mounted host files system)
+- Default TPCs to get downloaded to /host/tpcmdisk/docker-default and mgmt TPCs to get downloaded to /host/tpcmdisk/docker-mgmt
+- Though the limit is set to 20% for the /host/tpcmdisk, it will not hard reserve/occupy the underlying base /host disk space. 
+  It just allocates blocks and marks them as uninitialized.
+  This allows the sonic owned dockers or the host apps to use the /host space to the fullest.
+- Update in expansion of TPC disk limit checks for the available disk space in /host minus 1G buffer for sonic apps
+- Update in shrink of TPC disk limit checks for the minimum file system blocks internally by resize2fs utility. 
+
+click/Klish CLI to update tpcm disk limit:
+    
+    tpcm update disk-limit <value>
+
+    <value> should be unit with one of the postfix `G` `M` `K` `g` `m` `k` characters
+    <value> shall not be decimal
+ 
+
+Instances on a 32G disk system:
+
+- Default tpcm disk image and mounted disk size on a 32G disk system:
+  The disk image file system is present in /host/disk-img/tpcm.ext4. 
+  The tpcmdisk size could be measured from this file system as it is the logical size and
+  the actual usable size will be shown in the mount point.
+
+        root@sonic:/home/admin# ls -lh /host/disk-img/tpcm.ext4
+        -rw-r--r-- 1 root root 6.3G Jul 18 15:14 /host/disk-img/tpcm.ext4
+        root@sonic:/home/admin#
+        root@sonic:/home/admin# df -h | grep tpcmdisk
+        /dev/loop3      6.2G  248M  5.6G   5% /host/tpcmdisk
+
+- klish tpcm update:
+        
+        sonic# tpcm update disk-limit 10G
+        [ SUCCESS ] Update complete
+        root@sonic:/home/admin# df -h | grep tpcmdisk
+        /dev/loop2      9.8G  248M  9.1G   3% /host/tpcmdisk
+
+        sonic# tpcm update disk-limit 5G
+        [ SUCCESS ] Update complete
+        root@sonic:/home/admin# df -h | grep tpcmdisk
+        /dev/loop2      4.9G  245M  4.4G   6% /host/tpcmdisk
+
+- Error Checks
+
+        sonic# tpcm update disk-limit 500h
+        %Error: [ ERROR ] Invalid input, The postfix should be one of the `G` `M` `K` `g` `m` `k` characters
+        [ FAILED ] Update failed
+
+
+        sonic# tpcm update disk-limit 10.5G
+        %Error: [ ERROR ] Invalid input, Decimal value is not supported
+        [ FAILED ] Update failed
+
+        sonic# tpcm update disk-limit 500G
+        %Error: [ ERROR ] disk-limit input is greater than current maximum allowed disk space(19230M or 18.78G)
+        [ FAILED ] Update failed
+
+        sonic# tpcm update disk-limit 10M
+        %Error: [ ERROR ] disk-limit input is smaller than current minimum allowed disk limit(353M or 0.35G)
+        [ FAILED ] Update failed
+
+
+Installation on system with disk space less than 32G:
+        
+        sonic# tpcm install name 123 pull httpd
+        New TPC docker image will be installed, continue? [y/N]: y
+        [ ERROR ] TPC not supported in systems with disk space less than 32G
+        [ FAILED ] Installation failed
+
+
 
 ### CPU Resource
 - By default, for each TPC docker, the CPU resource limit is restricted to 20%.
 
 ### Memory Resource
-- Memory is restricted to 30% of the system memory.
+- TPC overall memory limit is restricted to 20% of system memory  ( say, 3087MB from 15G system ram)
+- By default, if individual tpc memory limit is not specified with the newly introduced args input(--memory) to "tpcm install",
+  20% of TPC overall memory limit is assigned ( say, 617MB from 3087MB in a 15G system ram)
+- Idea is that summation of the memory limits configured for all TPCs must not go beyond the overall TPC memory limit set.
+- The value for --memory is designed to be parsed using docker.utils.parse_bytes which defines the postfix to the unit specified should be
+  one of the `b` `k` `m` `g` characters (or) KB/MB/GB  or  K/M/G  or the unit without any postfix be consider a simple byte value.
+- Also, --memory value shall not be less than 6MB as per the generic docker install criteria.
+- Once the installation is done, the memory limit could be viewed from "docker inspect <TPC name>" or "docker stats" command.
+
+click CLI args to support memory limit:
+	
+	tpcm install name <container_name> pull/file/image/scp/url/sftp..  < >   --args="--memory=<value>"
+
+klish CLI args to support memory limit:
+	
+	tpcm install name <container_name> pull httpd args "--memory=<value"
+
+
+Instances on a 15G RAM system:
+		
+- Default memory limit for each TPC will be set when the arg --memory is not issued:
+
+		tpcm install name va1 pull httpd
+		New TPC docker image will be installed, continue? [y/N]: y
+		Memory limit 617MB set for va1 from overall TPC limit 3087MB
+		Pulling the TPC-va1 image.
+		Installing the TPC-va1 service file
+		Installing the TPC-va1 config file
+		Auto starting the TPC-va1
+		[ SUCCESS ] Installation complete
+
+
+- memory specified:
+
+		tpcm install name va2 pull httpd --args="--memory=50m --net=host --privileged"
+		New TPC docker image will be installed, continue? [y/N]: y
+		Memory limit set for va2 is 50MB from overall TPC limit 3087MB
+		Pulling the TPC-va2 image.
+		Installing the TPC-va2 service file
+		Installing the TPC-va2 config file
+		Auto starting the TPC-va2
+		[ SUCCESS ] Installation complete
+
+
+- Error checks:
+
+		tpcm install name va2 pull httpd --args="--memory=5h --net=host --privileged"
+		New TPC docker image will be installed, continue? [y/N]: y
+		The specified value for memory (5h) should specify the units. The postfix should be one of the `b` `k` `m` `g` characters
+		[ FAILED ] Installation failed
+
+
+		tpcm install name va2 pull httpd --args="--memory=5m --net=host --privileged"
+		New TPC docker image will be installed, continue? [y/N]: y
+		[ ERROR ] Minimum memory limit allowed is 6MB
+		[ FAILED ] Installation failed
+
+	    tpcm install name try7 pull httpd  --args="--memory=500m"
+		New TPC docker image will be installed, continue? [y/N]: y
+		[ ERROR ] Overall TPC memory limit reached- 3087MB   
+		[ FAILED ] Installation failed
+
+
+
+The same applies to "tpcm upgrade" CLI as well.
+
+		tpcm upgrade name test1 pull httpd --args="--memory=1G"
+		TPC docker will be upgraded to new image, continue? [y/N]: y
+		Memory limit 1024MB for test1 set from overall TPC limit 3087MB
+		Running PRE scripts for TPC-test1 image upgrade
+		Removing the existing TPC image httpd
+		Installing new TPC-test1 image
+		Pulling the TPC-test1 image.
+		Installing the TPC-test1 service file
+		Installing the TPC-test1 config file
+		Auto starting the TPC-test1
+		Running POST scripts for TPC-test1 image upgrade
+		[ SUCCESS ] Upgrade complete
+
+
 
 
 ## TPCM CLIs
@@ -226,6 +416,7 @@ The TPCM@mgmt service is a SONiC systemd service and it gets added dynamically w
 		tpcm uninstall => Uninstall the TPC image from SONiC system.
 		tpcm upgrade   => Upgrade the existing TPC container.
 		tpcm list      => list the existing TPC images.
+		tpcm update    => update the existing TPC container config
 
 
 ## TPC Install
@@ -322,6 +513,21 @@ The TPCM@mgmt service is a SONiC systemd service and it gets added dynamically w
 
 - During the TPC upgrade if any these operation fails, it will rollback to old container.
 
+## TPC Update
+
+- The TPCM framework allows the user to update the configs of TPC Dockers present already.
+- The configs include the memory limit, the vrf and the start-after-system-ready.
+- The flag --memory is used to update the memory limit of the TPC docker. This will not restart the TPC docker.
+- The flag --vrf-name is used to update the vrf of the TPC docker. This will restart the TPC docker.
+- The flag --start-after-system-ready is used to update the TPC service boot order to be after system ready or not.
+- memory value is parsed by docker.utils.parse_bytes which defines the postfix to the unit specified should be one of the `b` `k` `m` `g` characters (or) KB/MB/GB  or  K/M/G  or the unit without any postfix be consider a simple byte value.
+- vrf-name value is the string.
+- All the flags or one of the flags could be specified to updated the TPC docker accordingly.
+
+    - Example:
+
+                tpcm update name <tpc-name>  --memory=<value> --vrf-name=<value> --start-after-ready=<True/False>
+
 
 # CLI:
 
@@ -334,13 +540,14 @@ TPC image can be loaded and installed in three forms:
 1. Load the TPC image file from a external http/https server
 
     - Syntax:
-	    - #### tpcm install name \<tpc-container-name\> url \<URL\> [--vrf \<vrf-name\>] [--args \<docker args\>] [--cargs \<container args\>][-y]
+	    - #### tpcm install name \<tpc-container-name\> url \<URL\> [--vrf-name\<vrf-name\>] [--args \<docker args\>] [--cargs \<container args\>] [--start-after-system-ready\<False/True\>] [-y] 
 	- where:
 	    -  \<tpc-container-name\>  => Name of the TPC container to be loaded.
 	    - \<URL\> => It is http/https web url from which the TPC image can be downloaded.
         - \<vrf-name> => VRF name
 	    - --args => It specifies the additional docker parameters.
 	    - --cargs => It specifies the additional arguments to container init process or scripts.
+		- --start-after-system-ready => It specifies if TPC to start after system ready or not.
         - [-y]  => User confirmation
 
 	- Example:
@@ -350,8 +557,8 @@ TPC image can be loaded and installed in three forms:
 2. Load the image file from a external server through scp/sftp
 
     - Syntax:
-        - #### tpcm install name \<tpc-container-name> scp  \<server name>  --username \<username> [--password \<password>] --filename \<TPC image path> [--vrf \<vrf-name\>] [--args \<docker args>] [--cargs \<container args>] [-y] 
-        - #### tpcm install name \<tpc-container-name> sftp \<server name>  --username \<username> [--password \<password>] --filename \<TPC image path> [--vrf \<vrf-name\>] [--args \<docker args>] [--cargs \<container args>] [-y] 
+        - #### tpcm install name \<tpc-container-name> scp  \<server name>  --username \<username> [--password \<password>] --filename \<TPC image path> [--vrf-name\<vrf-name\>] [--args \<docker args>] [--cargs \<container args>] [--start-after-system-ready\<False/True\>] [-y] 
+        - #### tpcm install name \<tpc-container-name> sftp \<server name>  --username \<username> [--password \<password>] --filename \<TPC image path> [--vrf-name\<vrf-name\>] [--args \<docker args>] [--cargs \<container args>] [--start-after-system-ready\<False/True\>] [-y] 
         
     - where:
         - \<tpc-container-name>  => Name of the TPC container to be loaded.
@@ -362,6 +569,7 @@ TPC image can be loaded and installed in three forms:
         - \<vrf-name> => VRF name
 	    - --args => It specifies the additional docker parameters.
 	    - --cargs => It specifies the additional arguments to container init process or scripts.
+		- --start-after-system-ready => It specifies if TPC to start after system ready or not.
 	    - [-y] => User confirmation
 
     - Example:
@@ -372,13 +580,14 @@ TPC image can be loaded and installed in three forms:
 3. Load the image file from a local media path
 
     - Syntax:
-        - #### tpcm install name \<tpc-container-name> file  \<TPC image path> [--vrf \<vrf-name\>] [--args \<docker args>] [--cargs \<container args>] [-y]
+        - #### tpcm install name \<tpc-container-name> file  \<TPC image path> [--vrf-name\<vrf-name\>] [--args \<docker args>] [--cargs \<container args>] [--start-after-system-ready\<False/True\>] [-y]
 
     - where:
 	     - \<TPC image path> => Local media path where the TPC image is located.
         - \<vrf-name> => VRF name
 	    - --args => It specifies the additional docker parameters.
 	    - --cargs => It specifies the additional arguments to container init process or scripts.
+		- --start-after-system-ready => It specifies if TPC to start after system ready or not.
         - [-y]   => User confirmation
 
 	- Example:
@@ -391,7 +600,7 @@ TPC image can be loaded and installed in three forms:
     - It loads the TPC image directly from external Docker registry into local Docker image filesystem.
 
 	- Syntax:
-	    - #### tpcm install name \<tpc-container-name> pull \<Image name>[:\<tagname>] [--vrf \<vrf-name>] [--args \<docker args>] [--cargs \<container args>] [-y]
+	    - #### tpcm install name \<tpc-container-name> pull \<Image name>[:\<tagname>] [--vrf-name\<vrf-name>] [--args \<docker args>] [--cargs \<container args>] [--start-after-system-ready\<False/True\>] [-y]
 
 	- where 
 	    - <tpc-container-name>  => Name of the TPC container to be loaded.
@@ -400,6 +609,7 @@ TPC image can be loaded and installed in three forms:
         - \<vrf-name> => VRF name
 	    - --args => It specifies the additional docker parameters.
 	    - --cargs => It specifies the additional arguments to container init process or scripts.
+		- --start-after-system-ready => It specifies if TPC to start after system ready or not.
         - [-y] => User confirmation.
 
     - Example:
@@ -411,7 +621,7 @@ TPC image can be loaded and installed in three forms:
 	- It uses one of the exising docker images installed in the system. It simply creates the service file and takes care of TPC and migration feature across the image  upgrade. This allows the user to use the regular docker commands to create the TPC images. Once the image is ready, user can associate TPCM management feature to it. 
 
 	- Syntax:
-	    - #### tpcm install name \<tpc-container-name> image \<Image name>[:\<tagname>] [--vrf \<vrf-name>] [--args <docker args>] [--cargs <container args>] [-y]
+	    - #### tpcm install name \<tpc-container-name> image \<Image name>[:\<tagname>] [--vrf-name\<vrf-name>] [--args <docker args>] [--cargs <container args>] [--start-after-system-ready\<False/True\>] [-y]
 
 	- where 
 	    - \<tpc-container-name>  => Name of the TPC container to be created.
@@ -420,6 +630,7 @@ TPC image can be loaded and installed in three forms:
         - \<vrf-name> => VRF name
 	    - --dargs => It specifies the additional docker parameters.
 	    - --cargs => It specifies the additional arguments to container init process or scripts.
+		- --start-after-system-ready => It specifies if TPC to start after system ready or not.
         - [-y] => User confirmation
         
     - Example:
@@ -431,7 +642,7 @@ TPC image can be loaded and installed in three forms:
 - Uninstalling the tpc image
 
     - Syntax
-        - #### tpcm uninstall name \<container-name\> [--vrf \<vrf-name>] [-y] [--clean_data]
+        - #### tpcm uninstall name \<container-name\> [-y] [--clean_data]
 
     - where 
 	    - \<tpc-container-name\>  => Name of the TPC container to be removed.
@@ -462,21 +673,60 @@ TPC image can be loaded and installed in three forms:
 
 - List the all TPC image that are installed on the system
     - Syntax
-        - #### tpcm list [--vrf \<vrf-name>]
+        - #### tpcm list [--vrf-name\<vrf-name>]
     - Where
         - \<vrf-name> => VRF name
 
 - Example
             
 		#  tpcm list
-		CONTAINER NAME  IMAGE TAG         VRF             STATUS
-		TEST            mydocker:latest   default         Up 8 seconds
+		CONTAINER NAME  IMAGE TAG         VRF RUNNING/CONFIGURED            STATUS
+		TEST            mydocker:latest   default/default                   Up 8 seconds
 
-## 5. TPC Service startup dependency
+## 5.  Update the TPC container
+
+- Update the TPC container that is installed on the system
+    - Syntax
+        - #### tpcm update [name|disk-limit <disk-limit-value> ] \<container-name\> [--memory\<mem-value>] [--vrf-name\<vrf-name>] [--start-after-system-ready\<False/True>]
+    - Where
+        - \<mem-value> => memory value
+        - \<vrf-name> => VRF name
+        - \<disk-limit-value> => overall tpcm disk limit value
+
+- Example
+            
+		#  tpcm update name mydocker --memory=400MB --vrf-name=mgmt --start-after-system-ready=True
+        #  tpcm update disk-limit 10G
+
+## 6. TPC Service startup dependency
 	
-- TPC services are started in parallel with SONIC services.
-- TPC should have capabilities to start after certain SONIC services.
-- Custom config/service file to pass or modify the TPC service arguments
+- By default, TPC will start only after the system(core services) is ready in 3.7
+- If a user wants to make a TPC to start way early for a reason (say, to monitor memory in the boot up etc),
+ "--start-after-system-ready=False" could be issued in the "tpcm install" command. But the user must be aware of the fact that certain functionalities may not work as excepted. For instance, host network(--network=host) wont be available to the TPC if it starts prior to hostcfgd. In such case, user has to explicitly update the service file accordingly.
+		
+		tpcm install name <tpcname> pull httpd --start-after-system-ready=<False/True>
+	In install command, if this option is not specified, TPC will be configured to start after system ready by default
+		
+- "tpcm update" command will also have the "--start-after-system-ready" option to start TPC after the system is ready or not.
+		
+		tpcm update name <tpcname> --start-after-system-ready=<False/True>
+		
+- TPC migration from 3.4 to 3.7 sonic image: TPC services will be automatically updated to start after system is ready.
+- TPC migration from 3.7 to 3.4 sonic image: TPC services' start after system ready boot order dependency will be removed
+- TPC migration from 3.7 to >=3.7 sonic image: TPC services' configured boot dependency will be preserved.
+		
+- For TPC to start after a specific sonic service, following guidance will be provided in SONiC User Guide as well.
+
+	Say for HTTPD1 TPC service to start after bgp service, 
+		
+		"sudo systemctl edit HTTPD1.service" 
+	should be issued which opens up an editor in override.conf filename
+	where the following could be added and saved
+	
+		[Unit]
+		After=bgp.service
+		
+
 
 
 # KLISH CLI:
@@ -488,17 +738,17 @@ TPC image can be loaded and installed in three forms:
 1. Load the TPC image file from a external http/https server
 
     - Syntax:
-        #### tpcm install name \<tpc-container-name> url \<URL> [vrf \<vrf-name>] [args \<docker args>] [cargs \<container args>]
+        #### tpcm install name \<tpc-container-name> url \<URL> [vrf-name\<vrf-name>] [args \<docker args>] [cargs \<container args>] [start-after-system-ready\<True/False>]
 
         - Example:
             - sonic# tpcm install name mydocker url http://myserver/path/mydocker.tar.gz
-            - sonic# tpcm install name mydocker url http://myserver/path/mydocker.tar.gz dargs " -e TESTENV=TESTVALUE"
+            - sonic# tpcm install name mydocker url http://myserver/path/mydocker.tar.gz args " -e TESTENV=TESTVALUE"
 
 2. Load the image file from a external server through scp/sftp
 
     - Syntax:
-         - #### tpcm install name \<tpc-container-name> scp \<server name>  username \<username> password \<password> filename \<TPC image path> [vrf \<vrf-name>] [args \<docker args>] [cargs \<container args>]
-        - #### tpcm install name \<tpc-container-name> sftp <server name>  username \<username> password \<password> filename \<TPC image path> [vrf \<vrf-name>] [args \<docker args>] [cargs \<container args>]
+         - #### tpcm install name \<tpc-container-name> scp \<server name>  username \<username> password \<password> filename \<TPC image path> [vrf-name\<vrf-name>] [args \<docker args>] [cargs \<container args>] [start-after-system-ready\<True/False>]
+        - #### tpcm install name \<tpc-container-name> sftp <server name>  username \<username> password \<password> filename \<TPC image path> [vrf-name\<vrf-name>] [args \<docker args>] [cargs \<container args>] [start-after-system-ready\<True/False>]
 
     - Example:
 
@@ -508,7 +758,7 @@ TPC image can be loaded and installed in three forms:
 
 - Load from the local file system
     - Syntax:
-        - #### tpcm install name \<tpc-container-name> file  \<TPC image path> [vrf \<vrf-name>] [args \<docker args>] [cargs \<container args>]
+        - #### tpcm install name \<tpc-container-name> file  \<TPC image path> [vrf-name\<vrf-name>] [args \<docker args>] [cargs \<container args>] [start-after-system-ready\<True/False>]
 
     - Example:
         - sonic# tpcm install name mydocker file /media/usb/path/mydocker.tar.gz
@@ -519,7 +769,7 @@ TPC image can be loaded and installed in three forms:
 
 - Load from the docker hub.
     - Syntax:
-        - #### tpcm install name \<tpc-container-name> pull \<Image name>[:\<Tagname>] [vrf \<vrf-name>] [args \<docker args>] [cargs \<container args>]
+        - #### tpcm install name \<tpc-container-name> pull \<Image name>[:\<Tagname>] [vrf-name\<vrf-name>] [args \<docker args>] [cargs \<container args>] [start-after-system-ready\<True/False>]
 
     - Example:
 
@@ -528,7 +778,7 @@ TPC image can be loaded and installed in three forms:
 5. Use one of the existing docker image
 
     - Syntax:
-        - #### tpcm install name \<tpc-container-name> image \<Image name>[:\<Tagname>] [vrf \<vrf-name>] [args \<docker args>] [cargs \<container args>]
+        - #### tpcm install name \<tpc-container-name> image \<Image name>[:\<Tagname>] [vrf-name\<vrf-name>] [args \<docker args>] [cargs \<container args>] [start-after-system-ready\<True/False>]
         
     - Example:
 
@@ -566,7 +816,7 @@ TPC image can be loaded and installed in three forms:
 
 ## 2. Uninstalling the TPC image
 
-#### tpcm uninstall name \<container-name\> [vrf \<vrf-name>] [clean_data \<yes/no>]
+#### tpcm uninstall name \<container-name\> [vrf-name\<vrf-name>] [clean_data \<yes/no>]
 
 - where 
 	--clean_data => If yes, container data is removed, else data is not removed.  
@@ -641,13 +891,13 @@ TPC image can be loaded and installed in three forms:
 
 ## 4.  List the TPC images
 
-#### show tpcm list [vrf \<vrf-name>] 
+#### show tpcm list [vrf-name\<vrf-name>] 
         - The TPCs can be listed using the tpcm list command.
 
         - Example:
            sonic#   show tpcm list
-                    CONTAINER NAME  IMAGE TAG         VRF             STATUS
-                    TEST            mydocker:latest   default         Up 8 seconds
+                    CONTAINER NAME  IMAGE TAG         VRF CONFIGURED/RUNNING            STATUS
+                    TEST            mydocker:latest   default/default                   Up 8 seconds
 
 #### Data Model:
 
@@ -686,11 +936,21 @@ TPC image can be loaded and installed in three forms:
     - If user needs to connect to the VRF docker, one of the following option should be used.
 
 	    - Use DOCKER_HOST to access the TPC dockers.
-		    - export DOCKER_HOST=unix:///mgmt.socket
+		    - export DOCKER_HOST=unix:///run/docker-mgmt.socket
             - docker ps
 	    - Use -H option to pass the socket option.
-            - docker -H unix:///mgmt.socket ps 
+            - docker -H unix:///run/docker-mgmt.socket ps 
 
+
+## 5.  Update the TPC images
+
+#### tpcm update [name|disk-limit <disk-limit-value>] \<container-name\> [memory\<mem-value>] [vrf-name\<vrf-name>] [start-after-system-ready\<True/False>]
+        - The TPCs can be updated using the tpcm update command.
+        - Also, overall TPC disk limit can be updated.
+
+        - Example:
+           sonic#   tpcm update name TEST memory 200M vrf-name "mgmt" start-after-system-ready False
+           sonic#   tpcm update disk-limit 10G
 
 ## SONiC Image ONIE install
 
@@ -751,4 +1011,4 @@ TPC image can be loaded and installed in three forms:
     25| Verify the VRF option in the KLISH/CLICK/REST interface.
     26| Verify the TPC upgrade on VRF TPCs.
     27| Verify the TPC migration between default VRF and mgmt VRF.
-
+    28| Verify the TPC update of memory, disk.
